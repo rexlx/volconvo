@@ -4,12 +4,13 @@ package forum
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// schema contains the SQL statements to create the necessary tables and extensions.
+// schema remains the same.
 const schema = `
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TABLE IF NOT EXISTS topics (
@@ -32,50 +33,130 @@ CREATE TABLE IF NOT EXISTS posts (
 CREATE INDEX IF NOT EXISTS idx_posts_on_topic_id ON posts(topic_id);
 `
 
-// Database now holds a pgxpool.Pool directly.
 type Database struct {
 	pool *pgxpool.Pool
 }
 
-// NewDatabase creates a new Database instance and connects using a pgxpool.
 func NewDatabase(connectionString string) (*Database, error) {
 	pool, err := pgxpool.New(context.Background(), connectionString)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create connection pool: %w", err)
 	}
-
 	if err := pool.Ping(context.Background()); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
-
 	return &Database{pool: pool}, nil
 }
 
-// CreateTables executes the schema definition to create tables if they don't exist.
 func (d *Database) CreateTables() error {
 	_, err := d.pool.Exec(context.Background(), schema)
-	if err != nil {
-		return fmt.Errorf("failed to create tables: %w", err)
-	}
-	return nil
+	return err
 }
 
-// CreateTopic inserts a new topic into the database.
+// --- Topic Functions ---
+
 func (d *Database) CreateTopic(topic *Topic) error {
 	query := `INSERT INTO topics (id, title, tags) VALUES ($1, $2, $3) RETURNING created_at`
 	return d.pool.QueryRow(context.Background(), query, topic.ID, topic.Title, topic.Tags).Scan(&topic.CreatedAt)
 }
 
-// GetTopic retrieves a single topic by its UUID.
 func (d *Database) GetTopic(id uuid.UUID) (*Topic, error) {
 	var topic Topic
 	query := `SELECT id, title, tags, created_at FROM topics WHERE id = $1`
 	row := d.pool.QueryRow(context.Background(), query, id)
 	err := row.Scan(&topic.ID, &topic.Title, &topic.Tags, &topic.CreatedAt)
+	return &topic, err
+}
+
+// SearchAndListTopics retrieves a paginated list of topics, with an optional search query.
+func (d *Database) SearchAndListTopics(searchQuery string, page, pageSize int) ([]Topic, error) {
+	offset := (page - 1) * pageSize
+
+	// Base query
+	query := "SELECT id, title, tags, created_at FROM topics"
+	args := []interface{}{}
+
+	// Add search condition if a query is provided
+	if searchQuery != "" {
+		query += " WHERE title ILIKE $1 OR $2 = ANY(tags)"
+		args = append(args, "%"+searchQuery+"%", strings.ToLower(searchQuery))
+	}
+
+	// Add ordering and pagination
+	query += " ORDER BY created_at DESC LIMIT $%d OFFSET $%d"
+	query = fmt.Sprintf(query, len(args)+1, len(args)+2)
+	args = append(args, pageSize, offset)
+
+	rows, err := d.pool.Query(context.Background(), query, args...)
 	if err != nil {
 		return nil, err
 	}
-	return &topic, nil
+	defer rows.Close()
+
+	var topics []Topic
+	for rows.Next() {
+		var topic Topic
+		if err := rows.Scan(&topic.ID, &topic.Title, &topic.Tags, &topic.CreatedAt); err != nil {
+			return nil, err
+		}
+		topics = append(topics, topic)
+	}
+	return topics, rows.Err()
+}
+
+// CountTopics returns the total number of topics, with an optional search query.
+func (d *Database) CountTopics(searchQuery string) (int, error) {
+	query := "SELECT COUNT(*) FROM topics"
+	args := []interface{}{}
+
+	if searchQuery != "" {
+		query += " WHERE title ILIKE $1 OR $2 = ANY(tags)"
+		args = append(args, "%"+searchQuery+"%", strings.ToLower(searchQuery))
+	}
+
+	var count int
+	err := d.pool.QueryRow(context.Background(), query, args...).Scan(&count)
+	return count, err
+}
+
+// --- Post Functions ---
+
+func (d *Database) CreatePost(post *Post) error {
+	query := `INSERT INTO posts (topic_id, author, body) VALUES ($1, $2, $3) RETURNING id, created_at`
+	return d.pool.QueryRow(context.Background(), query, post.TopicID, post.Author, post.Body).Scan(&post.ID, &post.CreatedAt)
+}
+
+// GetPostsByTopic retrieves a paginated list of posts for a given topic.
+func (d *Database) GetPostsByTopic(topicID uuid.UUID, page, pageSize int) ([]Post, error) {
+	offset := (page - 1) * pageSize
+	query := `SELECT id, topic_id, author, body, created_at FROM posts 
+	          WHERE topic_id = $1 
+	          ORDER BY created_at ASC 
+	          LIMIT $2 OFFSET $3`
+
+	rows, err := d.pool.Query(context.Background(), query, topicID, pageSize, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var posts []Post
+	for rows.Next() {
+		var p Post
+		if err := rows.Scan(&p.ID, &p.TopicID, &p.Author, &p.Body, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		posts = append(posts, p)
+	}
+	return posts, rows.Err()
+}
+
+// CountPostsByTopic returns the total number of posts for a given topic.
+func (d *Database) CountPostsByTopic(topicID uuid.UUID) (int, error) {
+	var count int
+	query := "SELECT COUNT(*) FROM posts WHERE topic_id = $1"
+	err := d.pool.QueryRow(context.Background(), query, topicID).Scan(&count)
+	return count, err
 }
 
 // GetAllTopics retrieves all topics from the database, ordered by most recent.
@@ -98,37 +179,4 @@ func (d *Database) GetAllTopics() ([]Topic, error) {
 	}
 
 	return topics, nil
-}
-
-// CreatePost inserts a new post into the database, linked to a topic.
-func (d *Database) CreatePost(post *Post) error {
-	query := `INSERT INTO posts (topic_id, author, body) VALUES ($1, $2, $3) RETURNING id, created_at`
-	return d.pool.QueryRow(context.Background(), query, post.TopicID, post.Author, post.Body).Scan(&post.ID, &post.CreatedAt)
-}
-
-// GetPostsByTopic retrieves all posts for a given topic, ordered by creation time.
-func (d *Database) GetPostsByTopic(topicID uuid.UUID) ([]Post, error) {
-	posts := make([]Post, 0)
-	query := `SELECT id, topic_id, author, body, created_at FROM posts WHERE topic_id = $1 ORDER BY created_at ASC`
-
-	rows, err := d.pool.Query(context.Background(), query, topicID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var p Post
-		if err := rows.Scan(&p.ID, &p.TopicID, &p.Author, &p.Body, &p.CreatedAt); err != nil {
-			return nil, err
-		}
-		posts = append(posts, p)
-	}
-
-	// After the loop, check for any error that occurred during iteration.
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return posts, nil
 }

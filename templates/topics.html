@@ -16,10 +16,10 @@
         .container { 
             max-width: 800px; 
             margin: auto; 
-            background: #070314ff; 
+            background: #060606ff; 
             padding: 2em; 
             border-radius: 8px; 
-            box-shadow: 0 4px 10px rgba(0,0,0,0.4); 
+            box-shadow: 0 4px 10px rgba(5, 97, 97, 0.4); 
         }
         h1 { 
             color: #00d1b2; 
@@ -56,13 +56,23 @@
             margin-right: 5px;
             border: 1px solid #00d1b2;
         }
+        .search-form { margin-bottom: 2em; }
+        .search-form input[type="text"] { width: 100%; padding: 10px; border-radius: 4px; border: 1px solid #676375ba; box-sizing: border-box; background-color: #000; color: #55938aff; }
+        .pagination { display: flex; justify-content: space-between; margin-top: 2em; padding-top: 1em; border-top: 2px solid #555; }
+        .pagination a { font-size: 1em; background-color: #00d1b2; color: #222; padding: 8px 15px; border-radius: 4px; }
+        .pagination a.disabled { background-color: #555; color: #888; cursor: not-allowed; pointer-events: none; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>All Topics</h1>
+
+        <form action="/topics" method="get" class="search-form">
+            <input type="text" name="q" placeholder="Search by title or tag..." value="{{.SearchQuery}}">
+        </form>
+
         <ul>
-            {{range .}}
+            {{range .Topics}}
             <li>
                 <a href="/topics/{{.ID}}">{{.Title}}</a>
                 <div class="tags">
@@ -72,9 +82,25 @@
                 </div>
             </li>
             {{else}}
-            <li>No topics have been created yet.</li>
+            <li>No topics found.</li>
             {{end}}
         </ul>
+
+        <div class="pagination">
+            {{if .Pagination.HasPrev}}
+                <a href="/topics?q={{.SearchQuery}}&page={{.Pagination.PrevPage}}">&larr; Previous</a>
+            {{else}}
+                <a href="#" class="disabled">&larr; Previous</a>
+            {{end}}
+
+            <span>Page {{.Pagination.CurrentPage}} of {{.Pagination.TotalPages}}</span>
+
+            {{if .Pagination.HasNext}}
+                <a href="/topics?q={{.SearchQuery}}&page={{.Pagination.NextPage}}">Next &rarr;</a>
+            {{else}}
+                <a href="#" class="disabled">Next &rarr;</a>
+            {{end}}
+        </div>
     </div>
 </body>
 </html>

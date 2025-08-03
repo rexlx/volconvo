@@ -95,8 +95,9 @@ func (h *Handlers) listTopics(w http.ResponseWriter, r *http.Request) {
 
 // TopicViewData holds all the data needed for the topic view template.
 type TopicViewData struct {
-	Topic Topic
-	Posts []Post
+	Topic     Topic
+	Posts     []Post
+	UserEmail string
 }
 
 // showTopic fetches a single topic and its posts, then renders the topic.html template.

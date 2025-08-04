@@ -2,6 +2,7 @@
 package forum
 
 import (
+	"encoding/json"
 	"html/template"
 	"log"
 	"net/http"
@@ -51,19 +52,24 @@ func NewHandlers(db *Database) (*Handlers, error) {
 }
 
 func (h *Handlers) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/topics", h.listTopics)
+	mux.HandleFunc("/topics", h.handleTopics) // Use the new multiplexer
 	mux.HandleFunc("/topics/", h.showTopic)
 }
 
-// listTopics handles searching and paginating all topics.
-func (h *Handlers) listTopics(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		// Re-route POST requests for creating topics if needed, or handle here.
-		// For now, only GET is handled for viewing.
+// handleTopics acts as a router for the /topics endpoint based on the HTTP method.
+func (h *Handlers) handleTopics(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.listTopics(w, r)
+	case http.MethodPost:
+		h.createTopic(w, r)
+	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
+}
 
+// listTopics handles GET requests for searching and paginating all topics.
+func (h *Handlers) listTopics(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	if page < 1 {
 		page = 1
@@ -205,7 +211,30 @@ func (h *Handlers) createPost(w http.ResponseWriter, r *http.Request, topicIDStr
 	http.Redirect(w, r, "/topics/"+topicIDStr, http.StatusSeeOther)
 }
 
-// This handler is for API-based topic creation.
+// createTopic handles API requests to create a new topic from a JSON payload.
 func (h *Handlers) createTopic(w http.ResponseWriter, r *http.Request) {
-	// ... implementation for API-based creation if needed
+	var topic Topic
+	if err := json.NewDecoder(r.Body).Decode(&topic); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if topic.ID == uuid.Nil || topic.Title == "" {
+		http.Error(w, "Missing topic ID or title", http.StatusBadRequest)
+		return
+	}
+
+	if topic.Tags == nil {
+		topic.Tags = []string{}
+	}
+
+	if err := h.db.CreateTopic(&topic); err != nil {
+		log.Printf("Error creating topic: %v", err)
+		http.Error(w, "Failed to create topic", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(topic)
 }

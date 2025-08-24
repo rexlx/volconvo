@@ -3,6 +3,8 @@ package forum
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -10,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// schema remains the same.
+// The schema is updated to correctly match the User and Token models.
 const schema = `
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE TABLE IF NOT EXISTS topics (
@@ -29,6 +31,28 @@ CREATE TABLE IF NOT EXISTS posts (
         FOREIGN KEY(topic_id)
         REFERENCES topics(id)
         ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+	key TEXT NOT NULL UNIQUE,
+	handle TEXT NOT NULL,
+	hash BYTEA,
+	password TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	notifications JSONB NOT NULL DEFAULT '[]',
+	admin BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE TABLE IF NOT EXISTS tokens (
+	id UUID PRIMARY KEY,
+	email TEXT NOT NULL,
+	user_id UUID NOT NULL,
+	token TEXT NOT NULL,
+	handle TEXT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	expires_at TIMESTAMPTZ NOT NULL,
+	hash BYTEA NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_posts_on_topic_id ON posts(topic_id);
 `
@@ -65,34 +89,28 @@ func (d *Database) GetTopic(id uuid.UUID) (*Topic, error) {
 	query := `SELECT id, title, tags, created_at FROM topics WHERE id = $1`
 	row := d.pool.QueryRow(context.Background(), query, id)
 	err := row.Scan(&topic.ID, &topic.Title, &topic.Tags, &topic.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil // Return nil, nil for not found
+	}
 	return &topic, err
 }
 
-// SearchAndListTopics retrieves a paginated list of topics, with an optional search query.
 func (d *Database) SearchAndListTopics(searchQuery string, page, pageSize int) ([]Topic, error) {
 	offset := (page - 1) * pageSize
-
-	// Base query
 	query := "SELECT id, title, tags, created_at FROM topics"
 	args := []interface{}{}
-
-	// Add search condition if a query is provided
 	if searchQuery != "" {
 		query += " WHERE title ILIKE $1 OR $2 = ANY(tags)"
 		args = append(args, "%"+searchQuery+"%", strings.ToLower(searchQuery))
 	}
-
-	// Add ordering and pagination
 	query += " ORDER BY created_at DESC LIMIT $%d OFFSET $%d"
 	query = fmt.Sprintf(query, len(args)+1, len(args)+2)
 	args = append(args, pageSize, offset)
-
 	rows, err := d.pool.Query(context.Background(), query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var topics []Topic
 	for rows.Next() {
 		var topic Topic
@@ -104,16 +122,13 @@ func (d *Database) SearchAndListTopics(searchQuery string, page, pageSize int) (
 	return topics, rows.Err()
 }
 
-// CountTopics returns the total number of topics, with an optional search query.
 func (d *Database) CountTopics(searchQuery string) (int, error) {
 	query := "SELECT COUNT(*) FROM topics"
 	args := []interface{}{}
-
 	if searchQuery != "" {
 		query += " WHERE title ILIKE $1 OR $2 = ANY(tags)"
 		args = append(args, "%"+searchQuery+"%", strings.ToLower(searchQuery))
 	}
-
 	var count int
 	err := d.pool.QueryRow(context.Background(), query, args...).Scan(&count)
 	return count, err
@@ -126,20 +141,17 @@ func (d *Database) CreatePost(post *Post) error {
 	return d.pool.QueryRow(context.Background(), query, post.TopicID, post.Author, post.Body).Scan(&post.ID, &post.CreatedAt)
 }
 
-// GetPostsByTopic retrieves a paginated list of posts for a given topic.
 func (d *Database) GetPostsByTopic(topicID uuid.UUID, page, pageSize int) ([]Post, error) {
 	offset := (page - 1) * pageSize
 	query := `SELECT id, topic_id, author, body, created_at FROM posts 
 	          WHERE topic_id = $1 
 	          ORDER BY created_at ASC 
 	          LIMIT $2 OFFSET $3`
-
 	rows, err := d.pool.Query(context.Background(), query, topicID, pageSize, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var posts []Post
 	for rows.Next() {
 		var p Post
@@ -151,7 +163,6 @@ func (d *Database) GetPostsByTopic(topicID uuid.UUID, page, pageSize int) ([]Pos
 	return posts, rows.Err()
 }
 
-// CountPostsByTopic returns the total number of posts for a given topic.
 func (d *Database) CountPostsByTopic(topicID uuid.UUID) (int, error) {
 	var count int
 	query := "SELECT COUNT(*) FROM posts WHERE topic_id = $1"
@@ -159,24 +170,130 @@ func (d *Database) CountPostsByTopic(topicID uuid.UUID) (int, error) {
 	return count, err
 }
 
-// GetAllTopics retrieves all topics from the database, ordered by most recent.
-func (d *Database) GetAllTopics() ([]Topic, error) {
-	topics := make([]Topic, 0)
-	query := `SELECT id, title, tags, created_at FROM topics ORDER BY created_at DESC`
+// --- User and Token Functions ---
 
-	rows, err := d.pool.Query(context.Background(), query)
+// SaveUser now correctly saves all relevant user fields, including marshaling notifications to JSON.
+func (d *Database) SaveUser(user *User) error {
+	notificationsJSON, err := json.Marshal(user.Notifications)
 	if err != nil {
+		return fmt.Errorf("failed to marshal notifications: %w", err)
+	}
+
+	query := `
+		INSERT INTO users (id, email, key, handle, hash, password, created_at, updated_at, admin, notifications)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (email) DO UPDATE SET
+			key = EXCLUDED.key,
+			handle = EXCLUDED.handle,
+			hash = EXCLUDED.hash,
+			password = EXCLUDED.password,
+			updated_at = EXCLUDED.updated_at,
+			admin = EXCLUDED.admin,
+			notifications = EXCLUDED.notifications;
+	`
+	_, err = d.pool.Exec(context.Background(), query,
+		user.ID,
+		user.Email,
+		user.Key,
+		user.Handle,
+		user.Hash,
+		user.Password,
+		user.Created,
+		user.Updated,
+		user.Admin,
+		notificationsJSON,
+	)
+	return err
+}
+
+// SaveToken now correctly saves all fields of the token.
+func (d *Database) SaveToken(token *Token) error {
+	query := `
+		INSERT INTO tokens (id, user_id, email, token, handle, created_at, expires_at, hash)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (id) DO UPDATE SET
+			user_id = EXCLUDED.user_id,
+			email = EXCLUDED.email,
+			token = EXCLUDED.token,
+			handle = EXCLUDED.handle,
+			created_at = EXCLUDED.created_at,
+			expires_at = EXCLUDED.expires_at,
+			hash = EXCLUDED.hash;
+	`
+	_, err := d.pool.Exec(context.Background(), query,
+		token.ID,
+		token.UserID,
+		token.Email,
+		token.Token,
+		token.Handle,
+		token.CreatedAt,
+		token.ExpiresAt,
+		token.Hash,
+	)
+	return err
+}
+
+func (d *Database) GetTokenByValue(value string) (*Token, error) {
+	var token Token
+	query := `
+        SELECT id, user_id, email, token, handle, created_at, expires_at, hash
+        FROM tokens
+        WHERE token = $1`
+	row := d.pool.QueryRow(context.Background(), query, value)
+	err := row.Scan(
+		&token.ID,
+		&token.UserID,
+		&token.Email,
+		&token.Token,
+		&token.Handle,
+		&token.CreatedAt,
+		&token.ExpiresAt,
+		&token.Hash,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
 		return nil, err
 	}
-	defer rows.Close()
+	return &token, nil
+}
 
-	for rows.Next() {
-		var topic Topic
-		if err := rows.Scan(&topic.ID, &topic.Title, &topic.Tags, &topic.CreatedAt); err != nil {
-			return nil, err
+// GetUserByEmail now selects the correct columns and unmarshals the notifications JSON.
+func (d *Database) GetUserByEmail(email string) (*User, error) {
+	var user User
+	var notificationsJSON []byte
+
+	query := `
+        SELECT id, email, key, handle, hash, password, created_at, updated_at, admin, notifications
+        FROM users
+        WHERE email = $1`
+
+	row := d.pool.QueryRow(context.Background(), query, email)
+
+	err := row.Scan(
+		&user.ID,
+		&user.Email,
+		&user.Key,
+		&user.Handle,
+		&user.Hash,
+		&user.Password,
+		&user.Created,
+		&user.Updated,
+		&user.Admin,
+		&notificationsJSON,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil // Return nil, nil for not found, as is common practice
 		}
-		topics = append(topics, topic)
+		return nil, err
 	}
 
-	return topics, nil
+	if err := json.Unmarshal(notificationsJSON, &user.Notifications); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal notifications: %w", err)
+	}
+
+	return &user, nil
 }

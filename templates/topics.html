@@ -61,10 +61,20 @@
         .pagination { display: flex; justify-content: space-between; margin-top: 2em; padding-top: 1em; border-top: 2px solid #555; }
         .pagination a { font-size: 1em; background-color: #00d1b2; color: #222; padding: 8px 15px; border-radius: 4px; }
         .pagination a.disabled { background-color: #555; color: #888; cursor: not-allowed; pointer-events: none; }
+        .user-info { text-align: right; margin-bottom: 1em; color: #ccc; }
+        .user-info a { font-size: 1em; margin-left: 1em; }
     </style>
 </head>
 <body>
     <div class="container">
+        <div class="user-info">
+            {{if .User}}
+                <span>Welcome, {{.User.Handle}}</span>
+                <a href="/logout">Logout</a>
+            {{else}}
+                <a href="/login">Login</a>
+            {{end}}
+        </div>
         <h1>All Topics</h1>
 
         <form action="/topics" method="get" class="search-form">

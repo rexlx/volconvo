@@ -38,7 +38,12 @@ func main() {
 	// Start the server.
 	port := ":8080"
 	log.Printf("Starting forum server on %s", port)
-	if err := http.ListenAndServe(port, mux); err != nil {
+	sessionHandler := forumHandler.Session.LoadAndSave(mux)
+	svr := &http.Server{
+		Addr:    port,
+		Handler: sessionHandler,
+	}
+	if err := svr.ListenAndServe(); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
 }

@@ -45,7 +45,7 @@
             color: #00d1b2; 
         }
         .topic-header { 
-            border-bottom: 2px solid #555; 
+            border-bottom: 2px solid #666; 
             padding-bottom: 1em; 
             margin-bottom: 1em; 
         }
@@ -69,12 +69,15 @@
         }
         .post-author { 
             font-weight: bold; 
-            color: #676375ba; 
+            color: #5b46a6ba; 
         }
         .post-meta { 
             font-size: 0.9em; 
             color: #aaa; 
             margin-bottom: 10px; 
+        }
+        .post-footer {
+            margin-top: 15px;
         }
         .post-body { 
             background-color: #000;
@@ -106,7 +109,7 @@
             border: 1px solid #777; 
             box-sizing: border-box; 
             background-color: #060606ff;
-            color: #eee;
+            color: #6695a0ff;
         }
         button { 
             background-color: #000; 
@@ -145,7 +148,7 @@
                     on {{.CreatedAt.Format "Jan 02, 2006 at 3:04 PM"}}
                 </div>
                 <div class="post-body">
-                    {{.Body}}
+                    {{- .Body -}}
                 </div>
                 {{if $.User}}
                 <div class="post-footer">

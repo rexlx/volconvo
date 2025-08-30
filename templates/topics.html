@@ -63,6 +63,18 @@
         .pagination a.disabled { background-color: #555; color: #888; cursor: not-allowed; pointer-events: none; }
         .user-info { text-align: right; margin-bottom: 1em; color: #ccc; }
         .user-info a { font-size: 1em; margin-left: 1em; }
+        .notification-badge {
+        display: inline-block;
+        background-color: #b71c1c; /* A strong red color */
+        color: white;
+        border-radius: 50%; /* Makes it a circle */
+        padding: 2px 6px;
+        font-size: 0.75em;
+        font-weight: bold;
+        vertical-align: top; /* Aligns it nicely with the text */
+        margin-left: 4px;
+    }
+
     </style>
 </head>
 <body>
@@ -70,8 +82,13 @@
         <div class="user-info">
         {{if .User}}
             <span>Welcome, {{.User.Handle}}</span>
-            <!-- Add this link -->
-            <a href="/notifications">Notifications</a> 
+            
+            <a href="/notifications">
+            Notifications 
+            {{if .User.Notifications}}
+                <span class="notification-badge">{{len .User.Notifications}}</span>
+            {{end}}
+        </a> 
             <a href="/logout">Logout</a>
         {{else}}
             <a href="/login">Login</a>

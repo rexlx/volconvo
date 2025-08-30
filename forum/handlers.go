@@ -158,13 +158,26 @@ func (h *Handlers) listNotificationsHandler(w http.ResponseWriter, r *http.Reque
 // deleteNotificationHandler removes a notification for the logged-in user.
 func (h *Handlers) deleteNotificationHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
+		fmt.Println("Method not allowed:", r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	user, ok := r.Context().Value(userContextKey).(*User)
-	if !ok || user == nil {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	tkn, err := h.GetTokenFromSession(r)
+
+	if err != nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	tk, err := h.db.GetTokenByValue(tkn)
+	if err != nil || tk.ExpiresAt.Before(time.Now()) {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	user, err := h.db.GetUserByEmail(tk.Email)
+	if err != nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 
@@ -409,7 +422,27 @@ func (h *Handlers) listTopics(w http.ResponseWriter, r *http.Request) {
 	}
 	searchQuery := r.URL.Query().Get("q")
 
-	user, _ := r.Context().Value(userContextKey).(*User)
+	// token, err := h.GetTokenFromSession(r)
+	// if err != nil {
+	// 	http.Error(w, "Failed to retrieve token from session", http.StatusInternalServerError)
+	// 	return
+	// }
+	// tk, err := h.db.GetTokenByValue(token)
+	// if err != nil {
+	// 	http.Error(w, "Failed to retrieve token from database", http.StatusInternalServerError)
+	// 	return
+	// }
+	// user, err := h.db.GetUserByEmail(tk.Email)
+	// if err != nil {
+	// 	http.Error(w, "Failed to retrieve user from database", http.StatusInternalServerError)
+	// 	return
+	// }
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		fmt.Println("No user in context, must be anonymous")
+		http.Error(w, "You must be logged in to post", http.StatusUnauthorized)
+		return
+	}
 
 	topics, err := h.db.SearchAndListTopics(searchQuery, page, PageSize)
 	if err != nil {
@@ -478,7 +511,7 @@ func (h *Handlers) showTopic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, _ := r.Context().Value(userContextKey).(*User)
-
+	// fmt.Println("showTopic User in context:", user)
 	topic, err := h.db.GetTopic(topicID)
 	if err != nil {
 		http.NotFound(w, r)
@@ -519,26 +552,28 @@ func (h *Handlers) showTopic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) createPost(w http.ResponseWriter, r *http.Request, topicIDStr string) {
-	// user, ok := r.Context().Value(userContextKey).(*User)
-	// if !ok || user == nil {
-	// 	http.Error(w, "You must be logged in to post", http.StatusUnauthorized)
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		fmt.Println("No user in context, must be anonymous")
+		http.Error(w, "You must be logged in to post", http.StatusUnauthorized)
+		return
+	}
+	var post Post
+	// token, err := h.GetTokenFromSession(r)
+	// if err != nil {
+	// 	http.Error(w, "Failed to retrieve token from session", http.StatusInternalServerError)
 	// 	return
 	// }
-	token, err := h.GetTokenFromSession(r)
-	if err != nil {
-		http.Error(w, "Failed to retrieve token from session", http.StatusInternalServerError)
-		return
-	}
-	tk, err := h.db.GetTokenByValue(token)
-	if err != nil {
-		http.Error(w, "Failed to retrieve token from database", http.StatusInternalServerError)
-		return
-	}
-	user, err := h.db.GetUserByEmail(tk.Email)
-	if err != nil {
-		http.Error(w, "Failed to retrieve user from database", http.StatusInternalServerError)
-		return
-	}
+	// tk, err := h.db.GetTokenByValue(token)
+	// if err != nil {
+	// 	http.Error(w, "Failed to retrieve token from database", http.StatusInternalServerError)
+	// 	return
+	// }
+	// user, err := h.db.GetUserByEmail(tk.Email)
+	// if err != nil {
+	// 	http.Error(w, "Failed to retrieve user from database", http.StatusInternalServerError)
+	// 	return
+	// }
 
 	// topicID, err := uuid.Parse(topicIDStr)
 	// if err != nil {
@@ -551,32 +586,42 @@ func (h *Handlers) createPost(w http.ResponseWriter, r *http.Request, topicIDStr
 	}
 	userID := r.FormValue("user_id")
 	parentPostID := r.FormValue("parent_post_id")
-	_post, err := strconv.Atoi(parentPostID)
-	if err != nil {
-		http.Error(w, "Invalid parent post ID", http.StatusBadRequest)
-		return
+	if parentPostID != "" {
+		_post, err := strconv.Atoi(parentPostID)
+		if err != nil {
+			fmt.Println("Invalid parent post ID:", parentPostID, err)
+			http.Error(w, "Invalid parent post ID", http.StatusBadRequest)
+			return
+		}
+		postId, err := h.db.GetPost(int64(_post))
+		if err != nil {
+			http.Error(w, "Failed to retrieve post from database", http.StatusInternalServerError)
+			return
+		}
+		post = Post{
+			TopicID:  topicIDStr,
+			Author:   user.Handle,
+			Body:     r.FormValue("body"),
+			AuthorID: user.ID,
+		}
+		h.NotifCh <- Notification{
+			From:      userID,
+			UserID:    postId.AuthorID,
+			CreatedAt: time.Now(),
+			Message:   fmt.Sprintf("New post created in topic %s, (%s)", topicIDStr, parentPostID),
+			Link:      "/topics/" + topicIDStr,
+			ID:        uuid.New().String(),
+		}
 	}
 
-	postId, err := h.db.GetPost(int64(_post))
-	if err != nil {
-		http.Error(w, "Failed to retrieve post from database", http.StatusInternalServerError)
-		return
-	}
-	post := Post{
+	post = Post{
 		TopicID:  topicIDStr,
 		Author:   user.Handle,
 		Body:     r.FormValue("body"),
 		AuthorID: user.ID,
 	}
 	// TODO: nothing is listening yet!
-	h.NotifCh <- Notification{
-		From:      userID,
-		UserID:    postId.AuthorID,
-		CreatedAt: time.Now(),
-		Message:   fmt.Sprintf("New post created in topic %s, (%s)", topicIDStr, parentPostID),
-		Link:      "/topics/" + topicIDStr,
-		ID:        uuid.New().String(),
-	}
+
 	if post.Body == "" {
 		http.Error(w, "Body is a required field", http.StatusBadRequest)
 		return

@@ -45,7 +45,7 @@ func main() {
 		Handler: sessionHandler,
 	}
 
-	go forumHandler.StartNotificationListener(20 * time.Second)
+	go forumHandler.StartNotificationListener(1250 * time.Second)
 	if err := svr.ListenAndServe(); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}

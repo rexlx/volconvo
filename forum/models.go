@@ -3,24 +3,24 @@ package forum
 
 import (
 	"time"
-
-	"github.com/google/uuid"
 )
 
-// Topic represents the main subject of a conversation.
-// The `db` tags are no longer used but are harmless to keep.
+// Topic now includes the ID of the user who created it, as a string.
 type Topic struct {
-	ID        uuid.UUID `json:"id" db:"id"`
+	ID        string    `json:"id" db:"id"`
 	Title     string    `json:"title" db:"title"`
-	Tags      []string  `json:"tags" db:"tags"` // Back to native []string
+	Tags      []string  `json:"tags" db:"tags"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	AuthorID  string    `json:"author_id" db:"author_id"` // Changed to string
 }
 
-// Post represents a single message within a Topic.
+// Post now includes the author's ID and parent post ID, using string for UUIDs.
 type Post struct {
-	ID        int64     `json:"id" db:"id"`
-	TopicID   uuid.UUID `json:"topic_id" db:"topic_id"`
-	Author    string    `json:"author" db:"author"`
-	Body      string    `json:"body" db:"body"`
-	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	ID           int64     `json:"id" db:"id"`
+	TopicID      string    `json:"topic_id" db:"topic_id"` // Changed to string
+	Author       string    `json:"author" db:"author"`
+	Body         string    `json:"body" db:"body"`
+	CreatedAt    time.Time `json:"created_at" db:"created_at"`
+	AuthorID     string    `json:"author_id" db:"author_id"` // Changed to string
+	ParentPostID *int64    `json:"parent_post_id" db:"parent_post_id"`
 }

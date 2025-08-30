@@ -23,7 +23,8 @@ const SessionCookieName = "forum_session_token"
 // A contextKey is used to define a key for values stored in a request's context.
 type contextKey string
 
-const userContextKey = contextKey("token")
+// Corrected context key to store the user object, not the token.
+const userContextKey = contextKey("user")
 
 // PaginationData holds all the necessary info for rendering pagination controls.
 type PaginationData struct {
@@ -36,7 +37,6 @@ type PaginationData struct {
 }
 
 // TopicsViewData is the data structure for the topics list page.
-// It now includes the currently logged-in user.
 type TopicsViewData struct {
 	Topics      []Topic
 	Pagination  PaginationData
@@ -45,7 +45,6 @@ type TopicsViewData struct {
 }
 
 // TopicViewData is the data structure for the single topic page.
-// It now includes the currently logged-in user.
 type TopicViewData struct {
 	Topic      Topic
 	Posts      []Post
@@ -58,16 +57,22 @@ type LoginViewData struct {
 	Error string
 }
 
+// NotificationsViewData is for the notifications page.
+type NotificationsViewData struct {
+	User          *User
+	Notifications []Notification
+}
+
 type Handlers struct {
+	NotifCh   chan Notification
 	Session   *scs.SessionManager `json:"-"`
 	db        *Database
 	templates *template.Template
 }
 
 func NewHandlers(db *Database) (*Handlers, error) {
-	// Ensure all templates, including the new login.html, are parsed.
+	ntfCh := make(chan Notification, 100)
 	tpl, err := template.ParseGlob("templates/*.html")
-
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +86,7 @@ func NewHandlers(db *Database) (*Handlers, error) {
 	sessionMgr.Cookie.Secure = true
 	sessionMgr.Cookie.HttpOnly = true
 	hndlr := &Handlers{
+		NotifCh:   ntfCh,
 		Session:   sessionMgr,
 		db:        db,
 		templates: tpl,
@@ -91,14 +97,110 @@ func NewHandlers(db *Database) (*Handlers, error) {
 func (h *Handlers) RegisterRoutes(mux *http.ServeMux) {
 	// API routes
 	mux.HandleFunc("/api/user/create", h.addUserHandler)
+	mux.HandleFunc("/api/notifications/delete", h.deleteNotificationHandler) // New route
 
 	// Auth routes
 	mux.HandleFunc("/login", h.handleLogin)
 	mux.HandleFunc("/logout", h.handleLogout)
+	mux.HandleFunc("/notifications", h.listNotificationsHandler) // New route
 
-	// Wrap topic routes with authentication middleware
+	// Content routes with auth middleware
 	mux.Handle("/topics", h.ValidateSessionToken(http.HandlerFunc(h.handleTopics)))
 	mux.Handle("/topics/", h.ValidateSessionToken(http.HandlerFunc(h.showTopic)))
+}
+
+// listNotificationsHandler displays the user's notifications.
+func (h *Handlers) listNotificationsHandler(w http.ResponseWriter, r *http.Request) {
+	tkn, err := h.GetTokenFromSession(r)
+
+	if err != nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	tk, err := h.db.GetTokenByValue(tkn)
+	if err != nil || tk.ExpiresAt.Before(time.Now()) {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	user, err := h.db.GetUserByEmail(tk.Email)
+	if err != nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	// Mark notifications as read when the page is viewed.
+	var changed bool
+	for i := range user.Notifications {
+		if user.Notifications[i].ReadAt.IsZero() {
+			user.Notifications[i].ReadAt = time.Now()
+			changed = true
+		}
+	}
+
+	if changed {
+		if err := h.db.SaveUser(user); err != nil {
+			log.Printf("Error marking notifications as read: %v", err)
+			// Non-critical error, so we still render the page.
+		}
+	}
+
+	data := NotificationsViewData{
+		User:          user,
+		Notifications: user.Notifications,
+	}
+	err = h.templates.ExecuteTemplate(w, "notifications.html", data)
+	if err != nil {
+		log.Printf("Error executing notifications template: %v", err)
+	}
+}
+
+// deleteNotificationHandler removes a notification for the logged-in user.
+func (h *Handlers) deleteNotificationHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		return
+	}
+	notificationID := r.FormValue("id")
+	if notificationID == "" {
+		http.Error(w, "Missing notification ID", http.StatusBadRequest)
+		return
+	}
+
+	var found bool
+	var updatedNotifications []Notification
+	for _, n := range user.Notifications {
+		if n.ID == notificationID {
+			found = true
+		} else {
+			updatedNotifications = append(updatedNotifications, n)
+		}
+	}
+
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+
+	user.Notifications = updatedNotifications
+	if err := h.db.SaveUser(user); err != nil {
+		log.Printf("Error deleting notification: %v", err)
+		http.Error(w, "Failed to delete notification", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 // addUserHandler creates a new user from a JSON payload.
@@ -125,13 +227,7 @@ func (h *Handlers) addUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if user already exists
-	existingUser, err := h.db.GetUserByEmail(req.Email)
-	if err != nil {
-		log.Printf("Error checking for existing user: %v", err)
-		// http.Error(w, "Internal server error", http.StatusInternalServerError)
-		// return
-	}
+	existingUser, _ := h.db.GetUserByEmail(req.Email)
 	if existingUser != nil {
 		http.Error(w, "User with this email already exists", http.StatusConflict)
 		return
@@ -157,45 +253,36 @@ func (h *Handlers) addUserHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user.Sanitize() // Remove password hash before sending response
+	user.Sanitize()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(user)
 }
 
-// authMiddleware checks for a valid session cookie and adds the user to the request context.
+// ValidateSessionToken checks for a valid session and adds the user to the request context.
 func (h *Handlers) ValidateSessionToken(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, err := h.GetTokenFromSession(r)
 		if err != nil {
-			token := r.Header.Get("Authorization")
-			parts := strings.Split(token, ":")
-			if token == "" || len(parts) != 2 {
-				fmt.Println("token missing?", token)
-				// For web pages, we don't want to error out, just proceed without a user.
-				// We'll add a nil user to the context.
+			// No session token, check for API key
+			apiKey := r.Header.Get("Authorization")
+			parts := strings.Split(apiKey, ":")
+			if apiKey == "" || len(parts) != 2 {
 				ctx := context.WithValue(r.Context(), userContextKey, (*User)(nil))
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 			user, err := h.db.GetUserByEmail(parts[0])
-			if err != nil {
-				fmt.Println("Error getting user by email:", err, user, token)
-				http.Error(w, "Invalid token", http.StatusUnauthorized)
+			if err != nil || user == nil || user.Key != parts[1] {
+				http.Error(w, "Invalid API key", http.StatusUnauthorized)
 				return
 			}
-			if user.Key != parts[1] {
-				fmt.Println("User key mismatch:", user.Key, parts[1], token, parts)
-				http.Error(w, "Invalid token", http.StatusUnauthorized)
-				return
-			}
-			// API key is valid, add user to context and proceed.
 			ctx := context.WithValue(r.Context(), userContextKey, user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
-		// This part needs a GetTokenByValue function in your database logic.
+
 		tk, err := h.db.GetTokenByValue(token)
 		if err != nil || tk.ExpiresAt.Before(time.Now()) {
 			fmt.Println("Invalid session token:", token, err, tk)
@@ -227,11 +314,11 @@ func (h *Handlers) AddTokenToSession(r *http.Request, w http.ResponseWriter, tk 
 	h.Session.Put(r.Context(), "token", tk.Token)
 	return nil
 }
+
 func (h *Handlers) ClearSession(w http.ResponseWriter, r *http.Request) {
 	h.Session.Remove(r.Context(), "token")
 }
 
-// handleLogin routes GET and POST requests for the /login page.
 func (h *Handlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -243,12 +330,10 @@ func (h *Handlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// showLoginPage renders the login form.
 func (h *Handlers) showLoginPage(w http.ResponseWriter, r *http.Request, errorMsg string) {
 	h.templates.ExecuteTemplate(w, "login.html", LoginViewData{Error: errorMsg})
 }
 
-// processLogin handles the login form submission.
 func (h *Handlers) processLogin(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Failed to parse form", http.StatusBadRequest)
@@ -301,13 +386,11 @@ func (h *Handlers) processLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/topics", http.StatusSeeOther)
 }
 
-// handleLogout clears the session cookie.
 func (h *Handlers) handleLogout(w http.ResponseWriter, r *http.Request) {
 	h.Session.Remove(r.Context(), "token")
 	http.Redirect(w, r, "/topics", http.StatusSeeOther)
 }
 
-// handleTopics acts as a router for the /topics endpoint based on the HTTP method.
 func (h *Handlers) handleTopics(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -319,7 +402,6 @@ func (h *Handlers) handleTopics(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// listTopics handles GET requests for searching and paginating all topics.
 func (h *Handlers) listTopics(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	if page < 1 {
@@ -327,7 +409,6 @@ func (h *Handlers) listTopics(w http.ResponseWriter, r *http.Request) {
 	}
 	searchQuery := r.URL.Query().Get("q")
 
-	// Get user from context
 	user, _ := r.Context().Value(userContextKey).(*User)
 
 	topics, err := h.db.SearchAndListTopics(searchQuery, page, PageSize)
@@ -348,7 +429,7 @@ func (h *Handlers) listTopics(w http.ResponseWriter, r *http.Request) {
 	data := TopicsViewData{
 		Topics:      topics,
 		SearchQuery: searchQuery,
-		User:        user, // Pass user to the template
+		User:        user,
 		Pagination: PaginationData{
 			CurrentPage: page,
 			TotalPages:  totalPages,
@@ -365,13 +446,13 @@ func (h *Handlers) listTopics(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// showTopic handles viewing a single topic and paginating its posts.
 func (h *Handlers) showTopic(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/topics/")
 	parts := strings.Split(path, "/")
 	topicIDStr := parts[0]
 
 	if len(parts) == 2 && parts[1] == "posts" {
+		fmt.Println("Creating post for topic:", topicIDStr, parts)
 		if r.Method == http.MethodPost {
 			h.createPost(w, r, topicIDStr)
 		} else {
@@ -396,26 +477,22 @@ func (h *Handlers) showTopic(w http.ResponseWriter, r *http.Request) {
 		page = 1
 	}
 
-	// Get user from context
 	user, _ := r.Context().Value(userContextKey).(*User)
 
 	topic, err := h.db.GetTopic(topicID)
 	if err != nil {
-		log.Printf("Error getting topic: %v", err)
 		http.NotFound(w, r)
 		return
 	}
 
 	posts, err := h.db.GetPostsByTopic(topicID, page, PageSize)
 	if err != nil {
-		log.Printf("Error getting posts: %v", err)
 		http.Error(w, "Failed to retrieve posts", http.StatusInternalServerError)
 		return
 	}
 
 	totalPosts, err := h.db.CountPostsByTopic(topicID)
 	if err != nil {
-		log.Printf("Error counting posts: %v", err)
 		http.Error(w, "Failed to retrieve posts", http.StatusInternalServerError)
 		return
 	}
@@ -424,7 +501,7 @@ func (h *Handlers) showTopic(w http.ResponseWriter, r *http.Request) {
 	data := TopicViewData{
 		Topic: *topic,
 		Posts: posts,
-		User:  user, // Pass user to the template
+		User:  user,
 		Pagination: PaginationData{
 			CurrentPage: page,
 			TotalPages:  totalPages,
@@ -442,27 +519,64 @@ func (h *Handlers) showTopic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) createPost(w http.ResponseWriter, r *http.Request, topicIDStr string) {
-	user, ok := r.Context().Value(userContextKey).(*User)
-	if !ok || user == nil {
-		http.Error(w, "You must be logged in to post", http.StatusUnauthorized)
+	// user, ok := r.Context().Value(userContextKey).(*User)
+	// if !ok || user == nil {
+	// 	http.Error(w, "You must be logged in to post", http.StatusUnauthorized)
+	// 	return
+	// }
+	token, err := h.GetTokenFromSession(r)
+	if err != nil {
+		http.Error(w, "Failed to retrieve token from session", http.StatusInternalServerError)
+		return
+	}
+	tk, err := h.db.GetTokenByValue(token)
+	if err != nil {
+		http.Error(w, "Failed to retrieve token from database", http.StatusInternalServerError)
+		return
+	}
+	user, err := h.db.GetUserByEmail(tk.Email)
+	if err != nil {
+		http.Error(w, "Failed to retrieve user from database", http.StatusInternalServerError)
 		return
 	}
 
-	topicID, err := uuid.Parse(topicIDStr)
-	if err != nil {
-		http.Error(w, "Invalid topic ID", http.StatusBadRequest)
-		return
-	}
+	// topicID, err := uuid.Parse(topicIDStr)
+	// if err != nil {
+	// 	http.Error(w, "Invalid topic ID", http.StatusBadRequest)
+	// 	return
+	// }
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Failed to parse form", http.StatusBadRequest)
 		return
 	}
-	post := Post{
-		TopicID: topicID,
-		Author:  user.Handle, // Get author from logged-in user
-		Body:    r.FormValue("body"),
+	userID := r.FormValue("user_id")
+	parentPostID := r.FormValue("parent_post_id")
+	_post, err := strconv.Atoi(parentPostID)
+	if err != nil {
+		http.Error(w, "Invalid parent post ID", http.StatusBadRequest)
+		return
 	}
 
+	postId, err := h.db.GetPost(int64(_post))
+	if err != nil {
+		http.Error(w, "Failed to retrieve post from database", http.StatusInternalServerError)
+		return
+	}
+	post := Post{
+		TopicID:  topicIDStr,
+		Author:   user.Handle,
+		Body:     r.FormValue("body"),
+		AuthorID: user.ID,
+	}
+	// TODO: nothing is listening yet!
+	h.NotifCh <- Notification{
+		From:      userID,
+		UserID:    postId.AuthorID,
+		CreatedAt: time.Now(),
+		Message:   fmt.Sprintf("New post created in topic %s, (%s)", topicIDStr, parentPostID),
+		Link:      "/topics/" + topicIDStr,
+		ID:        uuid.New().String(),
+	}
 	if post.Body == "" {
 		http.Error(w, "Body is a required field", http.StatusBadRequest)
 		return
@@ -472,10 +586,10 @@ func (h *Handlers) createPost(w http.ResponseWriter, r *http.Request, topicIDStr
 		http.Error(w, "Failed to create post", http.StatusInternalServerError)
 		return
 	}
+
 	http.Redirect(w, r, "/topics/"+topicIDStr, http.StatusSeeOther)
 }
 
-// createTopic handles API requests to create a new topic from a JSON payload.
 func (h *Handlers) createTopic(w http.ResponseWriter, r *http.Request) {
 	var topic Topic
 	if err := json.NewDecoder(r.Body).Decode(&topic); err != nil {
@@ -483,7 +597,7 @@ func (h *Handlers) createTopic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if topic.ID == uuid.Nil || topic.Title == "" {
+	if topic.ID == "" || topic.Title == "" {
 		http.Error(w, "Missing topic ID or title", http.StatusBadRequest)
 		return
 	}
@@ -501,4 +615,29 @@ func (h *Handlers) createTopic(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(topic)
+}
+
+func (h *Handlers) StartNotificationListener(rate time.Duration) {
+	ticker := time.NewTicker(rate)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case notif := <-h.NotifCh:
+			if notif.UserID != "" {
+				user, err := h.db.GetUserByID(notif.UserID)
+				if err != nil {
+					fmt.Printf("Error retrieving user %s: %v\n", notif.UserID, err)
+					continue
+				}
+				user.Notifications = append(user.Notifications, notif)
+				go h.db.SaveUser(user)
+				// Send the notification to the user
+				fmt.Printf("Sending notification to user %s: %s\n", user.Email, notif.Message)
+			}
+		case <-ticker.C:
+			// Periodically check for new notifications
+			fmt.Println("some sort of maintenance task")
+		}
+	}
 }

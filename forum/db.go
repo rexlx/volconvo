@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS topics (
     id UUID PRIMARY KEY,
     title TEXT NOT NULL,
     tags TEXT[] NOT NULL DEFAULT '{}',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    author_id UUID NOT NULL
 );
 CREATE TABLE IF NOT EXISTS posts (
     id SERIAL PRIMARY KEY,
@@ -27,6 +28,8 @@ CREATE TABLE IF NOT EXISTS posts (
     author TEXT NOT NULL,
     body TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    author_id UUID NOT NULL,
+    parent_post_id INTEGER,
     CONSTRAINT fk_topic
         FOREIGN KEY(topic_id)
         REFERENCES topics(id)
@@ -35,24 +38,24 @@ CREATE TABLE IF NOT EXISTS posts (
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
-	key TEXT NOT NULL UNIQUE,
-	handle TEXT NOT NULL,
-	hash BYTEA,
-	password TEXT,
+    key TEXT NOT NULL UNIQUE,
+    handle TEXT NOT NULL,
+    hash BYTEA,
+    password TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-	notifications JSONB NOT NULL DEFAULT '[]',
-	admin BOOLEAN NOT NULL DEFAULT FALSE
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    notifications JSONB NOT NULL DEFAULT '[]',
+    admin BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE TABLE IF NOT EXISTS tokens (
-	id UUID PRIMARY KEY,
-	email TEXT NOT NULL,
-	user_id UUID NOT NULL,
-	token TEXT NOT NULL,
-	handle TEXT NOT NULL,
-	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-	expires_at TIMESTAMPTZ NOT NULL,
-	hash BYTEA NOT NULL
+    id UUID PRIMARY KEY,
+    email TEXT NOT NULL,
+    user_id UUID NOT NULL,
+    token TEXT NOT NULL,
+    handle TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    hash BYTEA NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_posts_on_topic_id ON posts(topic_id);
 `
@@ -80,15 +83,15 @@ func (d *Database) CreateTables() error {
 // --- Topic Functions ---
 
 func (d *Database) CreateTopic(topic *Topic) error {
-	query := `INSERT INTO topics (id, title, tags) VALUES ($1, $2, $3) RETURNING created_at`
-	return d.pool.QueryRow(context.Background(), query, topic.ID, topic.Title, topic.Tags).Scan(&topic.CreatedAt)
+	query := `INSERT INTO topics (id, title, tags, author_id) VALUES ($1, $2, $3, $4) RETURNING created_at`
+	return d.pool.QueryRow(context.Background(), query, topic.ID, topic.Title, topic.Tags, topic.AuthorID).Scan(&topic.CreatedAt)
 }
 
 func (d *Database) GetTopic(id uuid.UUID) (*Topic, error) {
 	var topic Topic
-	query := `SELECT id, title, tags, created_at FROM topics WHERE id = $1`
+	query := `SELECT id, title, tags, created_at, author_id FROM topics WHERE id = $1`
 	row := d.pool.QueryRow(context.Background(), query, id)
-	err := row.Scan(&topic.ID, &topic.Title, &topic.Tags, &topic.CreatedAt)
+	err := row.Scan(&topic.ID, &topic.Title, &topic.Tags, &topic.CreatedAt, &topic.AuthorID)
 	if err == sql.ErrNoRows {
 		return nil, nil // Return nil, nil for not found
 	}
@@ -97,7 +100,7 @@ func (d *Database) GetTopic(id uuid.UUID) (*Topic, error) {
 
 func (d *Database) SearchAndListTopics(searchQuery string, page, pageSize int) ([]Topic, error) {
 	offset := (page - 1) * pageSize
-	query := "SELECT id, title, tags, created_at FROM topics"
+	query := "SELECT id, title, tags, created_at, author_id FROM topics"
 	args := []interface{}{}
 	if searchQuery != "" {
 		query += " WHERE title ILIKE $1 OR $2 = ANY(tags)"
@@ -114,7 +117,7 @@ func (d *Database) SearchAndListTopics(searchQuery string, page, pageSize int) (
 	var topics []Topic
 	for rows.Next() {
 		var topic Topic
-		if err := rows.Scan(&topic.ID, &topic.Title, &topic.Tags, &topic.CreatedAt); err != nil {
+		if err := rows.Scan(&topic.ID, &topic.Title, &topic.Tags, &topic.CreatedAt, &topic.AuthorID); err != nil {
 			return nil, err
 		}
 		topics = append(topics, topic)
@@ -137,16 +140,16 @@ func (d *Database) CountTopics(searchQuery string) (int, error) {
 // --- Post Functions ---
 
 func (d *Database) CreatePost(post *Post) error {
-	query := `INSERT INTO posts (topic_id, author, body) VALUES ($1, $2, $3) RETURNING id, created_at`
-	return d.pool.QueryRow(context.Background(), query, post.TopicID, post.Author, post.Body).Scan(&post.ID, &post.CreatedAt)
+	query := `INSERT INTO posts (topic_id, author, body, author_id, parent_post_id) VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`
+	return d.pool.QueryRow(context.Background(), query, post.TopicID, post.Author, post.Body, post.AuthorID, post.ParentPostID).Scan(&post.ID, &post.CreatedAt)
 }
 
 func (d *Database) GetPostsByTopic(topicID uuid.UUID, page, pageSize int) ([]Post, error) {
 	offset := (page - 1) * pageSize
-	query := `SELECT id, topic_id, author, body, created_at FROM posts 
-	          WHERE topic_id = $1 
-	          ORDER BY created_at ASC 
-	          LIMIT $2 OFFSET $3`
+	query := `SELECT id, topic_id, author, body, created_at, author_id, parent_post_id FROM posts 
+              WHERE topic_id = $1 
+              ORDER BY created_at ASC 
+              LIMIT $2 OFFSET $3`
 	rows, err := d.pool.Query(context.Background(), query, topicID, pageSize, offset)
 	if err != nil {
 		return nil, err
@@ -155,12 +158,23 @@ func (d *Database) GetPostsByTopic(topicID uuid.UUID, page, pageSize int) ([]Pos
 	var posts []Post
 	for rows.Next() {
 		var p Post
-		if err := rows.Scan(&p.ID, &p.TopicID, &p.Author, &p.Body, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.TopicID, &p.Author, &p.Body, &p.CreatedAt, &p.AuthorID, &p.ParentPostID); err != nil {
 			return nil, err
 		}
 		posts = append(posts, p)
 	}
 	return posts, rows.Err()
+}
+
+func (d *Database) GetPost(id int64) (*Post, error) {
+	var post Post
+	query := `SELECT id, topic_id, author, body, created_at, author_id, parent_post_id FROM posts WHERE id = $1`
+	row := d.pool.QueryRow(context.Background(), query, id)
+	err := row.Scan(&post.ID, &post.TopicID, &post.Author, &post.Body, &post.CreatedAt, &post.AuthorID, &post.ParentPostID)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return &post, err
 }
 
 func (d *Database) CountPostsByTopic(topicID uuid.UUID) (int, error) {
@@ -172,7 +186,6 @@ func (d *Database) CountPostsByTopic(topicID uuid.UUID) (int, error) {
 
 // --- User and Token Functions ---
 
-// SaveUser now correctly saves all relevant user fields, including marshaling notifications to JSON.
 func (d *Database) SaveUser(user *User) error {
 	notificationsJSON, err := json.Marshal(user.Notifications)
 	if err != nil {
@@ -180,17 +193,17 @@ func (d *Database) SaveUser(user *User) error {
 	}
 
 	query := `
-		INSERT INTO users (id, email, key, handle, hash, password, created_at, updated_at, admin, notifications)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		ON CONFLICT (email) DO UPDATE SET
-			key = EXCLUDED.key,
-			handle = EXCLUDED.handle,
-			hash = EXCLUDED.hash,
-			password = EXCLUDED.password,
-			updated_at = EXCLUDED.updated_at,
-			admin = EXCLUDED.admin,
-			notifications = EXCLUDED.notifications;
-	`
+        INSERT INTO users (id, email, key, handle, hash, password, created_at, updated_at, admin, notifications)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (email) DO UPDATE SET
+            key = EXCLUDED.key,
+            handle = EXCLUDED.handle,
+            hash = EXCLUDED.hash,
+            password = EXCLUDED.password,
+            updated_at = EXCLUDED.updated_at,
+            admin = EXCLUDED.admin,
+            notifications = EXCLUDED.notifications;
+    `
 	_, err = d.pool.Exec(context.Background(), query,
 		user.ID,
 		user.Email,
@@ -206,20 +219,19 @@ func (d *Database) SaveUser(user *User) error {
 	return err
 }
 
-// SaveToken now correctly saves all fields of the token.
 func (d *Database) SaveToken(token *Token) error {
 	query := `
-		INSERT INTO tokens (id, user_id, email, token, handle, created_at, expires_at, hash)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (id) DO UPDATE SET
-			user_id = EXCLUDED.user_id,
-			email = EXCLUDED.email,
-			token = EXCLUDED.token,
-			handle = EXCLUDED.handle,
-			created_at = EXCLUDED.created_at,
-			expires_at = EXCLUDED.expires_at,
-			hash = EXCLUDED.hash;
-	`
+        INSERT INTO tokens (id, user_id, email, token, handle, created_at, expires_at, hash)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (id) DO UPDATE SET
+            user_id = EXCLUDED.user_id,
+            email = EXCLUDED.email,
+            token = EXCLUDED.token,
+            handle = EXCLUDED.handle,
+            created_at = EXCLUDED.created_at,
+            expires_at = EXCLUDED.expires_at,
+            hash = EXCLUDED.hash;
+    `
 	_, err := d.pool.Exec(context.Background(), query,
 		token.ID,
 		token.UserID,
@@ -259,7 +271,6 @@ func (d *Database) GetTokenByValue(value string) (*Token, error) {
 	return &token, nil
 }
 
-// GetUserByEmail now selects the correct columns and unmarshals the notifications JSON.
 func (d *Database) GetUserByEmail(email string) (*User, error) {
 	var user User
 	var notificationsJSON []byte
@@ -286,7 +297,46 @@ func (d *Database) GetUserByEmail(email string) (*User, error) {
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, nil // Return nil, nil for not found, as is common practice
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if err := json.Unmarshal(notificationsJSON, &user.Notifications); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal notifications: %w", err)
+	}
+
+	return &user, nil
+}
+
+// GetUserByID is required for the notification logic.
+func (d *Database) GetUserByID(id string) (*User, error) {
+	var user User
+	var notificationsJSON []byte
+
+	query := `
+        SELECT id, email, key, handle, hash, password, created_at, updated_at, admin, notifications
+        FROM users
+        WHERE id = $1`
+
+	row := d.pool.QueryRow(context.Background(), query, id)
+
+	err := row.Scan(
+		&user.ID,
+		&user.Email,
+		&user.Key,
+		&user.Handle,
+		&user.Hash,
+		&user.Password,
+		&user.Created,
+		&user.Updated,
+		&user.Admin,
+		&notificationsJSON,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
 		}
 		return nil, err
 	}

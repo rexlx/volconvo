@@ -68,13 +68,15 @@
 <body>
     <div class="container">
         <div class="user-info">
-            {{if .User}}
-                <span>Welcome, {{.User.Handle}}</span>
-                <a href="/logout">Logout</a>
-            {{else}}
-                <a href="/login">Login</a>
-            {{end}}
-        </div>
+        {{if .User}}
+            <span>Welcome, {{.User.Handle}}</span>
+            <!-- Add this link -->
+            <a href="/notifications">Notifications</a> 
+            <a href="/logout">Logout</a>
+        {{else}}
+            <a href="/login">Login</a>
+        {{end}}
+    </div>
         <h1>All Topics</h1>
 
         <form action="/topics" method="get" class="search-form">

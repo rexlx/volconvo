@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"time"
 
@@ -47,7 +46,7 @@ func (t *Token) CreateToken(userID string, ttl time.Duration) (*Token, error) {
 	hash := sha256.Sum256([]byte(tk.Token))
 	tk.Hash = hash[:]
 	tk.ID = uuid.New().String()
-	fmt.Printf("Generated token: %+v\n", tk) // Debugging line
+	// fmt.Printf("Generated token: %+v\n", tk)
 	return tk, nil
 }
 
@@ -135,6 +134,7 @@ func generateAPIKey() (string, error) {
 }
 
 type Notification struct {
+	From      string    `json:"from"`
 	ID        string    `json:"id"`
 	UserID    string    `json:"user_id"`
 	Message   string    `json:"message"`

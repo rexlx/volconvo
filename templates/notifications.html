@@ -1,0 +1,119 @@
+<!-- templates/notifications.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your Notifications</title>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6; 
+            margin: 2em; 
+            background-color: #000000; 
+            color: #00d1b2; 
+        }
+        .container { 
+            max-width: 800px; 
+            margin: auto; 
+            background: #060606ff; 
+            padding: 2em; 
+            border-radius: 8px; 
+            box-shadow: 0 4px 10px rgba(5, 97, 97, 0.4); 
+        }
+        h1 { 
+            color: #00d1b2; 
+            border-bottom: 2px solid #444;
+            padding-bottom: 0.5em;
+        }
+        .notification {
+            background: #000;
+            margin-bottom: 1em;
+            padding: 1em;
+            border-radius: 5px;
+            border: 1px solid #555;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .notification.unread {
+            border-left: 5px solid #00d1b2;
+        }
+        .notification-content {
+            flex-grow: 1;
+        }
+        .notification-meta {
+            font-size: 0.8em;
+            color: #aaa;
+        }
+        .delete-btn {
+            background: #b71c1c;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .delete-btn:hover {
+            background: #d32f2f;
+        }
+        .back-link { 
+            display: inline-block; 
+            margin-bottom: 2em; 
+            color: #00d1b2; 
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="/topics" class="back-link">&larr; All Topics</a>
+        <h1>Your Notifications</h1>
+        <div>
+            {{range .Notifications}}
+            <div class="notification {{if .ReadAt.IsZero}}unread{{end}}" id="notification-{{.ID}}">
+                <div class="notification-content">
+                    <p>{{.Message}}</p>
+                    <div class="notification-meta">
+                        Received on {{.CreatedAt.Format "Jan 02, 2006 at 3:04 PM"}}
+                    </div>
+                </div>
+                <button class="delete-btn" onclick="deleteNotification('{{.ID}}')">Delete</button>
+            </div>
+            {{else}}
+            <p>You have no notifications.</p>
+            {{end}}
+        </div>
+    </div>
+
+    <script>
+        function deleteNotification(notificationId) {
+            if (!confirm('Are you sure you want to delete this notification?')) {
+                return;
+            }
+
+            const formData = new URLSearchParams();
+            formData.append('id', notificationId);
+
+            fetch('/api/notifications/delete', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => {
+                if (response.ok) {
+                    const notificationElement = document.getElementById('notification-' + notificationId);
+                    if (notificationElement) {
+                        notificationElement.remove();
+                    }
+                } else {
+                    alert('Failed to delete notification. Please try again.');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('An error occurred. Please try again.');
+            });
+        }
+    </script>
+</body>
+</html>

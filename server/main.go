@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/rexlx/volconvo/forum"
 )
@@ -43,6 +44,8 @@ func main() {
 		Addr:    port,
 		Handler: sessionHandler,
 	}
+
+	go forumHandler.StartNotificationListener(20 * time.Second)
 	if err := svr.ListenAndServe(); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}

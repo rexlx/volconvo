@@ -1,4 +1,3 @@
-<!-- templates/notifications.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -42,9 +41,18 @@
         .notification-content {
             flex-grow: 1;
         }
+        .notification-content a {
+            color: #00d1b2;
+            text-decoration: none;
+            font-weight: bold;
+        }
+        .notification-content a:hover {
+            text-decoration: underline;
+        }
         .notification-meta {
             font-size: 0.8em;
             color: #aaa;
+            margin-top: 5px;
         }
         .delete-btn {
             background: #b71c1c;
@@ -73,7 +81,9 @@
             {{range .Notifications}}
             <div class="notification {{if .ReadAt.IsZero}}unread{{end}}" id="notification-{{.ID}}">
                 <div class="notification-content">
-                    <p>{{.Message}}</p>
+                    <p>
+                        <a href="{{.Link}}">{{.Message}}</a>
+                    </p>
                     <div class="notification-meta">
                         Received on {{.CreatedAt.Format "Jan 02, 2006 at 3:04 PM"}}
                     </div>

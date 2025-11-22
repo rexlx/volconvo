@@ -558,74 +558,68 @@ func (h *Handlers) createPost(w http.ResponseWriter, r *http.Request, topicIDStr
 		http.Error(w, "You must be logged in to post", http.StatusUnauthorized)
 		return
 	}
-	var post Post
-	// token, err := h.GetTokenFromSession(r)
-	// if err != nil {
-	// 	http.Error(w, "Failed to retrieve token from session", http.StatusInternalServerError)
-	// 	return
-	// }
-	// tk, err := h.db.GetTokenByValue(token)
-	// if err != nil {
-	// 	http.Error(w, "Failed to retrieve token from database", http.StatusInternalServerError)
-	// 	return
-	// }
-	// user, err := h.db.GetUserByEmail(tk.Email)
-	// if err != nil {
-	// 	http.Error(w, "Failed to retrieve user from database", http.StatusInternalServerError)
-	// 	return
-	// }
 
-	// topicID, err := uuid.Parse(topicIDStr)
-	// if err != nil {
-	// 	http.Error(w, "Invalid topic ID", http.StatusBadRequest)
-	// 	return
-	// }
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Failed to parse form", http.StatusBadRequest)
 		return
 	}
-	userID := r.FormValue("user_id")
-	parentPostID := r.FormValue("parent_post_id")
-	if parentPostID != "" {
-		_post, err := strconv.Atoi(parentPostID)
-		if err != nil {
-			fmt.Println("Invalid parent post ID:", parentPostID, err)
-			http.Error(w, "Invalid parent post ID", http.StatusBadRequest)
-			return
-		}
-		postId, err := h.db.GetPost(int64(_post))
-		if err != nil {
-			http.Error(w, "Failed to retrieve post from database", http.StatusInternalServerError)
-			return
-		}
-		post = Post{
-			TopicID:  topicIDStr,
-			Author:   user.Handle,
-			Body:     r.FormValue("body"),
-			AuthorID: user.ID,
-		}
-		h.NotifCh <- Notification{
-			From:      userID,
-			UserID:    postId.AuthorID,
-			CreatedAt: time.Now(),
-			Message:   fmt.Sprintf("New post created in topic %s, (%s)", topicIDStr, parentPostID),
-			Link:      "/topics/" + topicIDStr,
-			ID:        uuid.New().String(),
-		}
-	}
 
-	post = Post{
+	// 1. Initialize the basic post data first
+	post := Post{
 		TopicID:  topicIDStr,
 		Author:   user.Handle,
 		Body:     r.FormValue("body"),
 		AuthorID: user.ID,
 	}
-	// TODO: nothing is listening yet!
+
+	// 2. Handle Reply Logic
+	parentPostID := r.FormValue("parent_post_id")
+	if parentPostID != "" {
+		pid, err := strconv.Atoi(parentPostID)
+		if err != nil {
+			fmt.Println("Invalid parent post ID:", parentPostID, err)
+			http.Error(w, "Invalid parent post ID", http.StatusBadRequest)
+			return
+		}
+
+		parentPost, err := h.db.GetPost(int64(pid))
+		if err != nil {
+			http.Error(w, "Failed to retrieve post from database", http.StatusInternalServerError)
+			return
+		}
+
+		// FIX: Set the structural link so the DB knows this is a reply
+		pid64 := int64(pid)
+		post.ParentPostID = &pid64
+
+		// OPTIONAL: If you really want the "Quoting" style from your code,
+		// you can uncomment the line below. Otherwise, standard threading is usually cleaner.
+		post.Body = fmt.Sprintf("%s\n\n--- Replying to @%s ---\n\n%s", parentPost.Body, parentPost.Author, post.Body)
+
+		// FIX: Get the readable Topic Title for the notification
+		topicTitle := "Unknown Topic"
+		if tID, err := uuid.Parse(topicIDStr); err == nil {
+			if t, err := h.db.GetTopic(tID); err == nil {
+				topicTitle = t.Title
+			}
+		}
+
+		// FIX: Send a human-readable notification
+		h.NotifCh <- Notification{
+			From:      user.ID,
+			UserID:    parentPost.AuthorID,
+			CreatedAt: time.Now(),
+			Message:   fmt.Sprintf("New reply in topic: %s", topicTitle),
+			Link:      "/topics/" + topicIDStr,
+			ID:        uuid.New().String(),
+		}
+	}
 
 	if post.Body == "" {
 		http.Error(w, "Body is a required field", http.StatusBadRequest)
 		return
 	}
+
 	if err := h.db.CreatePost(&post); err != nil {
 		log.Printf("Error creating post: %v", err)
 		http.Error(w, "Failed to create post", http.StatusInternalServerError)
